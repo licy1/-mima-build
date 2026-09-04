@@ -1,0 +1,105 @@
+name: Build macOS ARM64
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build Apple Silicon
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun -f clang)"
+          export CGO_CFLAGS="-arch arm64"
+          export CGO_LDFLAGS="-arch arm64"
+          go build -trimpath -ldflags="-s -w" -o mima .
+
+      - name: Create macOS app
+        run: |
+          APP="密码箱.app"
+
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          cp mima "$APP/Contents/MacOS/mima"
+          chmod +x "$APP/Contents/MacOS/mima"
+
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>zh_CN</string>
+
+              <key>CFBundleDisplayName</key>
+              <string>密码箱</string>
+
+              <key>CFBundleExecutable</key>
+              <string>mima</string>
+
+              <key>CFBundleIdentifier</key>
+              <string>com.passwordbox.mima.v25</string>
+
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+
+              <key>CFBundleName</key>
+              <string>密码箱</string>
+
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+
+              <key>CFBundleShortVersionString</key>
+              <string>2.5</string>
+
+              <key>CFBundleVersion</key>
+              <string>2.5</string>
+
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          codesign --force --deep --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict "$APP"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$APP" \
+            "mima-v2.5-mac-arm64.zip"
+
+      - name: Upload password box app
+        uses: actions/upload-artifact@v4
+        with:
+          name: mima-v2.5-mac-arm64
+          path: mima-v2.5-mac-arm64.zip
+          if-no-files-found: error
+          retention-days: 7
