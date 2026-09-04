@@ -179,11 +179,11 @@ func encryptAndSave(password string) error {
 }
 
 // ==================== 国风武将专属配色 ====================
-var ColorRed = color.NRGBA{R: 103, G: 117, B: 255, A: 255}
-var ColorTeal = color.NRGBA{R: 16, G: 24, B: 58, A: 168}
-var ColorGold = color.NRGBA{R: 73, G: 103, B: 205, A: 120}
-var ColorArmor = color.NRGBA{R: 5, G: 10, B: 28, A: 112}
-var ColorGlass = color.NRGBA{R: 8, G: 16, B: 44, A: 150}
+var ColorRed = color.NRGBA{R: 112, G: 94, B: 255, A: 255}
+var ColorTeal = color.NRGBA{R: 12, G: 24, B: 58, A: 205}
+var ColorGold = color.NRGBA{R: 60, G: 130, B: 255, A: 150}
+var ColorArmor = color.NRGBA{R: 4, G: 10, B: 28, A: 160}
+var ColorGlass = color.NRGBA{R: 8, G: 16, B: 44, A: 205}
 
 // ==================== 高颜值专属错误弹窗 ====================
 func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
@@ -223,8 +223,8 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 
 func main() {
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱")
-	myWindow.Resize(fyne.NewSize(1100, 700))
+	myWindow := myApp.NewWindow("密码箱 v2.6")
+	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
 
 	var pathErr error
@@ -274,7 +274,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("✦ PASSWORD BOX · FIRST SETUP ✦", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.6", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -320,11 +320,11 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("✦ PASSWORD BOX · LOCKED ✦", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.6", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
-		subtitle := canvas.NewText("STARLIGHT VAULT  ·  LOCAL ENCRYPTION", color.NRGBA{R: 209, G: 176, B: 255, A: 255})
+		subtitle := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 209, G: 176, B: 255, A: 255})
 		subtitle.TextSize = 11
 		subtitle.Alignment = fyne.TextAlignCenter
 
@@ -440,18 +440,28 @@ func main() {
 		}
 
 		searchBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() { filterData(searchEntry.Text) })
+		toolsBtn := widget.NewButtonWithIcon("金库工具", theme.SettingsIcon(), func() {})
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		topBar := container.NewBorder(nil, nil, nil, container.NewHBox(searchBtn, addBtn), searchEntry)
-		topGlass := canvas.NewRectangle(color.NRGBA{R: 7, G: 15, B: 42, A: 168})
+		brand := canvas.NewText("MIMA   密码箱 v2.6", color.White)
+		brand.TextStyle = fyne.TextStyle{Bold: true}
+		brand.TextSize = 22
+		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
+		brandSub.TextSize = 10
+		brandBox := container.NewVBox(brand, brandSub)
+		searchRow := container.NewBorder(nil, nil, nil, container.NewHBox(searchBtn, toolsBtn, addBtn), searchEntry)
+		topBar := container.NewBorder(nil, nil, brandBox, nil, searchRow)
+		topGlass := canvas.NewRectangle(color.NRGBA{R: 5, G: 12, B: 35, A: 215})
+		topGlass.StrokeColor = color.NRGBA{R: 80, G: 105, B: 255, A: 160}
+		topGlass.StrokeWidth = 1
 		topContainer := container.NewStack(topGlass, container.NewPadded(topBar))
 
 		table = widget.NewTable(
 			func() (int, int) { return len(filteredData) + 1, 5 },
 			func() fyne.CanvasObject {
 				bg := canvas.NewRectangle(ColorArmor)
-				headerTxt := canvas.NewText("", color.Black)
+				headerTxt := canvas.NewText("", color.White)
 				headerTxt.TextStyle = fyne.TextStyle{Bold: true}
 				headerTxt.Alignment = fyne.TextAlignCenter
 				dataLbl := widget.NewLabel("")
@@ -494,12 +504,12 @@ func main() {
 				btn2.Show()
 
 				if row == 0 {
-					bg.FillColor = color.NRGBA{R: 40, G: 62, B: 130, A: 105}
+					bg.FillColor = color.NRGBA{R: 18, G: 35, B: 86, A: 210}
 					headers := []string{"标题", "网址", "用户名", "密码", "操作"}
 					headerTxt.Text = headers[col]
 					headerTxt.Show()
 				} else {
-					bg.FillColor = color.NRGBA{R: 5, G: 13, B: 38, A: 108}
+					bg.FillColor = color.NRGBA{R: 5, G: 13, B: 38, A: 175}
 					cellLayout.Show()
 					if row-1 >= len(filteredData) {
 						return
@@ -567,10 +577,16 @@ func main() {
 
 		filterData("")
 		mainBg := newVaultBackground()
-		mainShade := canvas.NewRectangle(color.NRGBA{R: 0, G: 4, B: 18, A: 62})
-		mainGlass := canvas.NewRectangle(color.NRGBA{R: 4, G: 10, B: 30, A: 76})
-		mainUI := container.NewBorder(topContainer, nil, nil, nil, table)
-		myWindow.SetContent(container.NewStack(mainBg, mainShade, mainGlass, mainUI))
+		mainShade := canvas.NewRectangle(color.NRGBA{R: 0, G: 4, B: 18, A: 38})
+		tablePanel := canvas.NewRectangle(color.NRGBA{R: 4, G: 10, B: 30, A: 145})
+		tablePanel.StrokeColor = color.NRGBA{R: 72, G: 98, B: 255, A: 145}
+		tablePanel.StrokeWidth = 1
+		status := canvas.NewText("本地 AES-256-GCM 加密   ·   数据仅保存在本机", color.NRGBA{R: 170, G: 185, B: 230, A: 220})
+		status.TextSize = 11
+		bottom := container.NewPadded(container.NewHBox(status, layout.NewSpacer()))
+		tableArea := container.NewStack(tablePanel, container.NewPadded(table))
+		mainUI := container.NewBorder(container.NewPadded(topContainer), bottom, nil, nil, container.NewPadded(tableArea))
+		myWindow.SetContent(container.NewStack(mainBg, mainShade, mainUI))
 	}
 
 	if _, err := os.Stat(dataFile); os.IsNotExist(err) {

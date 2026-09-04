@@ -1,11 +1,9 @@
-密码箱 v2.5 GitHub 自动构建包
+MIMA 密码箱 v2.6 上传说明
 
-上传方法：
-1. 解压本 ZIP。
-2. 把“解压后的所有文件和文件夹”上传到 GitHub 仓库 lic y1/-mima-build 的根目录。
-   注意：必须连同隐藏目录 .github 一起上传；不要只上传这个 ZIP 文件。
-3. Commit changes 到 main。
-4. GitHub Actions 会自动启动 Build macOS ARM64 App。
-5. 构建成功后，在 Actions -> 对应运行 -> Artifacts 下载 mima-v2.5-mac-arm64。
+建议：把本包解压后，将 main.go、vault_bg.png、go.mod、go.sum、inputsource_darwin.go 上传到仓库根目录覆盖旧文件。
+然后把 .github/workflows/build-macos.yml 的内容覆盖仓库中的同名 workflow。
 
-重要：不要上传 vault.dat，它包含你的真实密码库数据。
+本版识别特征：窗口标题必须显示“密码箱 v2.6”；背景不包含任何登录框、MIMA 字样、表格或按钮；这些 UI 都由 Go/Fyne 代码实时绘制。
+
+数据路径保持：~/Library/Application Support/PasswordBox/vault.dat
+加密格式和 v2.5 保持兼容。
