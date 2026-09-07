@@ -40,6 +40,22 @@ jobs:
           export CGO_LDFLAGS="-arch arm64"
           go build -trimpath -ldflags="-s -w" -o mima .
 
+      - name: Create app icon
+        run: |
+          rm -rf AppIcon.iconset
+          mkdir -p AppIcon.iconset
+          sips -z 16 16     app_icon.png --out AppIcon.iconset/icon_16x16.png
+          sips -z 32 32     app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
+          sips -z 32 32     app_icon.png --out AppIcon.iconset/icon_32x32.png
+          sips -z 64 64     app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
+          sips -z 128 128   app_icon.png --out AppIcon.iconset/icon_128x128.png
+          sips -z 256 256   app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
+          sips -z 256 256   app_icon.png --out AppIcon.iconset/icon_256x256.png
+          sips -z 512 512   app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
+          sips -z 512 512   app_icon.png --out AppIcon.iconset/icon_512x512.png
+          sips -z 1024 1024 app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns AppIcon.iconset -o AppIcon.icns
+
       - name: Create macOS app
         run: |
           APP="密码箱.app"
@@ -49,6 +65,7 @@ jobs:
 
           cp mima "$APP/Contents/MacOS/mima"
           chmod +x "$APP/Contents/MacOS/mima"
+          cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -57,34 +74,26 @@ jobs:
           <dict>
               <key>CFBundleDevelopmentRegion</key>
               <string>zh_CN</string>
-
               <key>CFBundleDisplayName</key>
               <string>密码箱</string>
-
               <key>CFBundleExecutable</key>
               <string>mima</string>
-
               <key>CFBundleIdentifier</key>
-              <string>com.passwordbox.mima.v25</string>
-
+              <string>com.passwordbox.mima.v27</string>
               <key>CFBundleInfoDictionaryVersion</key>
               <string>6.0</string>
-
               <key>CFBundleName</key>
               <string>密码箱</string>
-
               <key>CFBundlePackageType</key>
               <string>APPL</string>
-
               <key>CFBundleShortVersionString</key>
-              <string>2.5</string>
-
+              <string>2.7</string>
               <key>CFBundleVersion</key>
-              <string>2.5</string>
-
+              <string>2.7</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon.icns</string>
               <key>LSMinimumSystemVersion</key>
               <string>14.0</string>
-
               <key>NSHighResolutionCapable</key>
               <true/>
           </dict>
@@ -94,14 +103,12 @@ jobs:
           codesign --force --deep --sign - --timestamp=none "$APP"
           codesign --verify --deep --strict "$APP"
 
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$APP" \
-            "mima-v2.5-mac-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent             "$APP"             "mima-v2.7-mac-arm64.zip"
 
       - name: Upload password box app
         uses: actions/upload-artifact@v4
         with:
-          name: mima-v2.5-mac-arm64
-          path: mima-v2.5-mac-arm64.zip
+          name: mima-v2.7-mac-arm64
+          path: mima-v2.7-mac-arm64.zip
           if-no-files-found: error
           retention-days: 7
