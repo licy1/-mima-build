@@ -4,12 +4,14 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -21,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"golang.org/x/crypto/argon2"
 	"image/color"
 )
 
@@ -42,36 +45,72 @@ var dataFile string
 //go:embed vault_bg.png
 var vaultBackground []byte
 
-// vaultDataPath 把数据文件固定放到用户可写的 Application Support 目录。
-// Finder 启动 .app 时当前工作目录并不可靠，不能直接写 ./vault.dat。
-func vaultDataPath() (string, error) {
-	base, err := os.UserConfigDir()
+// appBundlePaths 返回当前 .app 的 bundle 根目录和 Resources 目录。
+// 正式打包后可执行文件位于 PasswordBox.app/Contents/MacOS/mima。
+func appBundlePaths() (bundleRoot, resourcesDir string, ok bool) {
+	exe, err := os.Executable()
 	if err != nil {
-		return "", err
+		return "", "", false
 	}
-	dir := filepath.Join(base, "PasswordBox")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", err
+	macosDir := filepath.Dir(exe)
+	contentsDir := filepath.Dir(macosDir)
+	if filepath.Base(contentsDir) != "Contents" {
+		return "", "", false
 	}
-	return filepath.Join(dir, "vault.dat"), nil
+	bundleRoot = filepath.Dir(contentsDir)
+	resourcesDir = filepath.Join(contentsDir, "Resources")
+	return bundleRoot, resourcesDir, true
 }
 
-// migrateLegacyVault 兼容旧版本：如果新位置没有数据，尝试迁移旧的 ./vault.dat。
+// vaultDataPath 按用户要求把密码库放在 .app/Contents/Resources/vault.dat。
+// 开发环境下回退到当前目录 vault.dat。
+func vaultDataPath() (string, error) {
+	if _, resourcesDir, ok := appBundlePaths(); ok {
+		if err := os.MkdirAll(resourcesDir, 0700); err != nil {
+			return "", err
+		}
+		return filepath.Join(resourcesDir, "vault.dat"), nil
+	}
+	return filepath.Abs("vault.dat")
+}
+
+// resignBundle 在 vault.dat 写入后重新做 ad-hoc 签名。
+// vault.dat 位于 app 包内部，修改它会改变签名封装，所以每次保存后都重新签名。
+func resignBundle() error {
+	bundleRoot, _, ok := appBundlePaths()
+	if !ok {
+		return nil
+	}
+	cmd := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", bundleRoot)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("重新签名失败: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// migrateLegacyVault 如果 .app 内还没有 vault.dat，优先迁移旧位置的 V2 金库。
+// 这样升级后不需要把用户的加密密码文件上传到公开 GitHub 仓库。
 func migrateLegacyVault(dst string) {
 	if _, err := os.Stat(dst); err == nil {
 		return
 	}
-	candidates := []string{"vault.dat"}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "vault.dat"))
+	var candidates []string
+	if base, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(base, "PasswordBox", "vault.dat"))
 	}
+	candidates = append(candidates, "vault.dat")
 	for _, src := range candidates {
-		if absSrc, _ := filepath.Abs(src); absSrc == dst {
+		absSrc, _ := filepath.Abs(src)
+		absDst, _ := filepath.Abs(dst)
+		if absSrc == absDst {
 			continue
 		}
 		b, err := os.ReadFile(src)
 		if err == nil && len(b) > 0 {
-			_ = os.WriteFile(dst, b, 0600)
+			if err := os.WriteFile(dst, b, 0600); err == nil {
+				_ = resignBundle()
+			}
 			return
 		}
 	}
@@ -131,22 +170,64 @@ func vaultGlassPanel(content fyne.CanvasObject, size fyne.Size) fyne.CanvasObjec
 	return container.NewCenter(container.NewStack(glowOuter, glowMid, panel, container.NewPadded(content)))
 }
 
-// ==================== 军工级加密引擎 (AES-256-GCM) ====================
-func deriveKey(password string) []byte {
-	key := []byte(password + "ironman_salt_2026_super_secure")
-	for i := 0; i < 10000; i++ {
-		hash := sha256.Sum256(key)
-		key = hash[:]
+// ==================== V2 加密引擎：Argon2id + AES-256-GCM ====================
+type VaultV2 struct {
+	Version    int    `json:"version"`
+	KDF        string `json:"kdf"`
+	Salt       string `json:"salt"`
+	Time       uint32 `json:"time"`
+	Memory     uint32 `json:"memory"`
+	Threads    uint8  `json:"threads"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+func deriveV2Key(password string, salt []byte, time, memory uint32, threads uint8) []byte {
+	return argon2.IDKey([]byte(password), salt, time, memory, threads, 32)
+}
+
+func decodeVaultEntries(plaintext []byte) error {
+	if err := json.Unmarshal(plaintext, &allData); err == nil {
+		return nil
 	}
-	return key
+	var wrapper struct {
+		Entries []PasswordEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(plaintext, &wrapper); err != nil {
+		return errors.New("V2 金库内容格式无法识别")
+	}
+	allData = wrapper.Entries
+	return nil
 }
 
 func loadAndDecrypt(password string) error {
-	ciphertext, err := os.ReadFile(dataFile)
+	raw, err := os.ReadFile(dataFile)
 	if err != nil {
 		return err
 	}
-	key := deriveKey(password)
+
+	var vault VaultV2
+	if err := json.Unmarshal(raw, &vault); err != nil {
+		return errors.New("密码库不是 V2 格式")
+	}
+	if vault.Version != 2 || strings.ToLower(vault.KDF) != "argon2id" {
+		return errors.New("密码库版本不受支持，请使用 V2")
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(vault.Salt)
+	if err != nil {
+		return errors.New("V2 salt 数据损坏")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(vault.Nonce)
+	if err != nil {
+		return errors.New("V2 nonce 数据损坏")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(vault.Ciphertext)
+	if err != nil {
+		return errors.New("V2 ciphertext 数据损坏")
+	}
+
+	key := deriveV2Key(password, salt, vault.Time, vault.Memory, vault.Threads)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
@@ -155,27 +236,67 @@ func loadAndDecrypt(password string) error {
 	if err != nil {
 		return err
 	}
-	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
-		return errors.New("数据文件已损坏")
+	if len(nonce) != gcm.NonceSize() {
+		return errors.New("V2 nonce 长度不正确")
 	}
-	nonce, cipherTextPart := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, cipherTextPart, nil)
+
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return errors.New("主密码错误，解密失败！")
+		return errors.New("主密码错误，V2 金库解密失败")
 	}
-	return json.Unmarshal(plaintext, &allData)
+	return decodeVaultEntries(plaintext)
 }
 
 func encryptAndSave(password string) error {
-	plaintext, _ := json.Marshal(allData)
-	key := deriveKey(password)
-	block, _ := aes.NewCipher(key)
-	gcm, _ := cipher.NewGCM(block)
+	plaintext, err := json.Marshal(allData)
+	if err != nil {
+		return err
+	}
+
+	salt := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return err
+	}
+
+	const timeCost uint32 = 3
+	const memoryCost uint32 = 65536
+	const threads uint8 = 4
+
+	key := deriveV2Key(password, salt, timeCost, memoryCost, threads)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
 	nonce := make([]byte, gcm.NonceSize())
-	io.ReadFull(rand.Reader, nonce)
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	return os.WriteFile(dataFile, ciphertext, 0600)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+
+	vault := VaultV2{
+		Version:    2,
+		KDF:        "argon2id",
+		Salt:       base64.StdEncoding.EncodeToString(salt),
+		Time:       timeCost,
+		Memory:     memoryCost,
+		Threads:    threads,
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	}
+	raw, err := json.MarshalIndent(vault, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+
+	if err := os.WriteFile(dataFile, raw, 0600); err != nil {
+		return err
+	}
+	return resignBundle()
 }
 
 // ==================== 国风武将专属配色 ====================
@@ -223,7 +344,7 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 
 func main() {
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱 v2.6")
+	myWindow := myApp.NewWindow("密码箱 v2.7")
 	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
 
@@ -274,7 +395,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.6", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.7", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -320,7 +441,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.6", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.7", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
@@ -444,7 +565,7 @@ func main() {
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		brand := canvas.NewText("MIMA   密码箱 v2.6", color.White)
+		brand := canvas.NewText("MIMA   密码箱 v2.7", color.White)
 		brand.TextStyle = fyne.TextStyle{Bold: true}
 		brand.TextSize = 22
 		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
