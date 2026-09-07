@@ -47,6 +47,64 @@ var vaultBackground []byte
 
 // appBundlePaths 返回当前 .app 的 bundle 根目录和 Resources 目录。
 // 正式打包后可执行文件位于 PasswordBox.app/Contents/MacOS/mima。
+// ensureWritableInstall 解决 macOS App Translocation：从下载目录首次启动时，
+// 系统可能把 App 放进只读的随机路径。此时把完整 App 安装到 ~/Applications，
+// 保留已有 App 内的 vault.dat，再移除 quarantine、重新签名并从可写位置重启。
+func ensureWritableInstall() (bool, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	if !strings.Contains(exe, "/AppTranslocation/") {
+		return false, nil
+	}
+
+	macosDir := filepath.Dir(exe)
+	contentsDir := filepath.Dir(macosDir)
+	srcApp := filepath.Dir(contentsDir)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, err
+	}
+	appsDir := filepath.Join(home, "Applications")
+	if err := os.MkdirAll(appsDir, 0755); err != nil {
+		return false, err
+	}
+	dstApp := filepath.Join(appsDir, "密码箱.app")
+
+	// 升级时先备份旧 App 内的 V2 金库，绝不覆盖用户密码数据。
+	var savedVault []byte
+	oldVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
+	if b, e := os.ReadFile(oldVault); e == nil && len(b) > 0 {
+		savedVault = b
+	}
+
+	_ = os.RemoveAll(dstApp)
+	cp := exec.Command("/bin/cp", "-R", srcApp, dstApp)
+	if out, e := cp.CombinedOutput(); e != nil {
+		return false, fmt.Errorf("安装到 ~/Applications 失败: %v: %s", e, strings.TrimSpace(string(out)))
+	}
+
+	if len(savedVault) > 0 {
+		newVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
+		if e := os.WriteFile(newVault, savedVault, 0600); e != nil {
+			return false, fmt.Errorf("恢复 vault.dat 失败: %v", e)
+		}
+	}
+
+	// 去除下载隔离属性，避免下一次再次进入 App Translocation。
+	_ = exec.Command("/usr/bin/xattr", "-dr", "com.apple.quarantine", dstApp).Run()
+	if out, e := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", dstApp).CombinedOutput(); e != nil {
+		return false, fmt.Errorf("安装后签名失败: %v: %s", e, strings.TrimSpace(string(out)))
+	}
+
+	if e := exec.Command("/usr/bin/open", dstApp).Start(); e != nil {
+		return false, fmt.Errorf("重新启动密码箱失败: %v", e)
+	}
+	return true, nil
+}
+
 func appBundlePaths() (bundleRoot, resourcesDir string, ok bool) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -310,7 +368,7 @@ var ColorGlass = color.NRGBA{R: 8, G: 16, B: 44, A: 205}
 func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 	var popup *widget.PopUp
 	bg := canvas.NewRectangle(color.NRGBA{R: 50, G: 30, B: 30, A: 255})
-	titleText := canvas.NewText("⚠️ "+title, color.NRGBA{R: 255, G: 100, B: 100, A: 255})
+	titleText := canvas.NewText(title, color.NRGBA{R: 255, G: 100, B: 100, A: 255})
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 	titleText.TextSize = 18
 
@@ -343,8 +401,13 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 }
 
 func main() {
+	// 在创建 GUI 前处理 App Translocation。成功重启后立即退出当前只读实例。
+	if relaunched, err := ensureWritableInstall(); err == nil && relaunched {
+		return
+	}
+
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱 v2.7")
+	myWindow := myApp.NewWindow("密码箱 v2.8")
 	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
 
@@ -395,7 +458,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.7", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.8", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -441,7 +504,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.7", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.8", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
@@ -565,7 +628,7 @@ func main() {
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		brand := canvas.NewText("MIMA   密码箱 v2.7", color.White)
+		brand := canvas.NewText("MIMA   密码箱 v2.8", color.White)
 		brand.TextStyle = fyne.TextStyle{Bold: true}
 		brand.TextSize = 22
 		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
