@@ -55,14 +55,26 @@ func ensureWritableInstall() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !strings.Contains(exe, "/AppTranslocation/") {
+	macosDir := filepath.Dir(exe)
+	contentsDir := filepath.Dir(macosDir)
+	if filepath.Base(contentsDir) != "Contents" {
+		return false, nil
+	}
+	srcApp := filepath.Dir(contentsDir)
+	resourcesDir := filepath.Join(contentsDir, "Resources")
+
+	// v2.9 不再依赖 AppTranslocation 路径名称。macOS 26 的实际路径形式
+	// 可能变化；直接做一次真实写入测试最可靠。
+	probe, probeErr := os.CreateTemp(resourcesDir, ".mima-write-test-*")
+	if probeErr == nil {
+		probeName := probe.Name()
+		_ = probe.Close()
+		_ = os.Remove(probeName)
 		return false, nil
 	}
 
-	macosDir := filepath.Dir(exe)
-	contentsDir := filepath.Dir(macosDir)
-	srcApp := filepath.Dir(contentsDir)
-
+	// 当前 App 不可写（典型情况：Gatekeeper App Translocation）。
+	// 自动安装到用户自己的 ~/Applications，再从可写位置启动。
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false, err
@@ -73,7 +85,12 @@ func ensureWritableInstall() (bool, error) {
 	}
 	dstApp := filepath.Join(appsDir, "密码箱.app")
 
-	// 升级时先备份旧 App 内的 V2 金库，绝不覆盖用户密码数据。
+	// 若当前已经是目标 App 但仍不可写，不删除自己，直接报告权限问题。
+	if same, _ := filepath.EvalSymlinks(srcApp); same == dstApp {
+		return false, fmt.Errorf("密码箱.app 当前不可写：%v", probeErr)
+	}
+
+	// 升级时优先保留 ~/Applications 旧 App 内的 V2 金库。
 	var savedVault []byte
 	oldVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
 	if b, e := os.ReadFile(oldVault); e == nil && len(b) > 0 {
@@ -83,28 +100,29 @@ func ensureWritableInstall() (bool, error) {
 	_ = os.RemoveAll(dstApp)
 	cp := exec.Command("/bin/cp", "-R", srcApp, dstApp)
 	if out, e := cp.CombinedOutput(); e != nil {
-		return false, fmt.Errorf("安装到 ~/Applications 失败: %v: %s", e, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("自动安装到 ~/Applications 失败: %v: %s", e, strings.TrimSpace(string(out)))
 	}
 
+	newResources := filepath.Join(dstApp, "Contents", "Resources")
+	if e := os.MkdirAll(newResources, 0755); e != nil {
+		return false, e
+	}
 	if len(savedVault) > 0 {
-		newVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
+		newVault := filepath.Join(newResources, "vault.dat")
 		if e := os.WriteFile(newVault, savedVault, 0600); e != nil {
 			return false, fmt.Errorf("恢复 vault.dat 失败: %v", e)
 		}
 	}
 
-	// 去除下载隔离属性，避免下一次再次进入 App Translocation。
 	_ = exec.Command("/usr/bin/xattr", "-dr", "com.apple.quarantine", dstApp).Run()
 	if out, e := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", dstApp).CombinedOutput(); e != nil {
 		return false, fmt.Errorf("安装后签名失败: %v: %s", e, strings.TrimSpace(string(out)))
 	}
-
 	if e := exec.Command("/usr/bin/open", dstApp).Start(); e != nil {
 		return false, fmt.Errorf("重新启动密码箱失败: %v", e)
 	}
 	return true, nil
 }
-
 func appBundlePaths() (bundleRoot, resourcesDir string, ok bool) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -372,7 +390,8 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 	titleText.TextStyle = fyne.TextStyle{Bold: true}
 	titleText.TextSize = 18
 
-	msgText := canvas.NewText(msg, color.White)
+	msgText := widget.NewLabel(msg)
+	msgText.Wrapping = fyne.TextWrapWord
 	msgText.Alignment = fyne.TextAlignCenter
 
 	btn := widget.NewButton("我知道了", func() {
@@ -407,7 +426,7 @@ func main() {
 	}
 
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱 v2.8")
+	myWindow := myApp.NewWindow("密码箱 v2.9")
 	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
 
@@ -458,7 +477,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.8", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.9", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -504,7 +523,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.8", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v2.9", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
@@ -628,7 +647,7 @@ func main() {
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		brand := canvas.NewText("MIMA   密码箱 v2.8", color.White)
+		brand := canvas.NewText("MIMA   密码箱 v2.9", color.White)
 		brand.TextStyle = fyne.TextStyle{Bold: true}
 		brand.TextSize = 22
 		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
