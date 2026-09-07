@@ -53,8 +53,9 @@ var vaultBackground []byte
 func ensureWritableInstall() (bool, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("无法取得程序路径: %w", err)
 	}
+	exe, _ = filepath.Abs(exe)
 	macosDir := filepath.Dir(exe)
 	contentsDir := filepath.Dir(macosDir)
 	if filepath.Base(contentsDir) != "Contents" {
@@ -63,34 +64,41 @@ func ensureWritableInstall() (bool, error) {
 	srcApp := filepath.Dir(contentsDir)
 	resourcesDir := filepath.Join(contentsDir, "Resources")
 
-	// v2.9 不再依赖 AppTranslocation 路径名称。macOS 26 的实际路径形式
-	// 可能变化；直接做一次真实写入测试最可靠。
-	probe, probeErr := os.CreateTemp(resourcesDir, ".mima-write-test-*")
-	if probeErr == nil {
-		probeName := probe.Name()
-		_ = probe.Close()
-		_ = os.Remove(probeName)
-		return false, nil
-	}
-
-	// 当前 App 不可写（典型情况：Gatekeeper App Translocation）。
-	// 自动安装到用户自己的 ~/Applications，再从可写位置启动。
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false, err
 	}
-	appsDir := filepath.Join(home, "Applications")
-	if err := os.MkdirAll(appsDir, 0755); err != nil {
-		return false, err
-	}
-	dstApp := filepath.Join(appsDir, "密码箱.app")
+	dstApp := filepath.Join(home, "Applications", "密码箱.app")
 
-	// 若当前已经是目标 App 但仍不可写，不删除自己，直接报告权限问题。
-	if same, _ := filepath.EvalSymlinks(srcApp); same == dstApp {
-		return false, fmt.Errorf("密码箱.app 当前不可写：%v", probeErr)
+	// 只有确认当前 Resources 真正可写，并且不在 macOS 临时/Translocation
+	// 区域时才继续原地运行。任何 /private/var/folders 下的实例都必须搬走。
+	inTemporaryArea := strings.HasPrefix(filepath.Clean(srcApp), "/private/var/folders/") ||
+		strings.Contains(srcApp, "/AppTranslocation/")
+	probeOK := false
+	if !inTemporaryArea {
+		if f, e := os.CreateTemp(resourcesDir, ".mima-write-test-*"); e == nil {
+			name := f.Name()
+			_ = f.Close()
+			_ = os.Remove(name)
+			probeOK = true
+		}
+	}
+	if probeOK {
+		return false, nil
 	}
 
-	// 升级时优先保留 ~/Applications 旧 App 内的 V2 金库。
+	// 如果已经位于 ~/Applications 但仍不可写，就明确报错，不再继续创建 vault。
+	cleanSrc, _ := filepath.Abs(srcApp)
+	cleanDst, _ := filepath.Abs(dstApp)
+	if cleanSrc == cleanDst {
+		return false, fmt.Errorf("~/Applications/密码箱.app/Contents/Resources 当前不可写")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dstApp), 0755); err != nil {
+		return false, fmt.Errorf("创建 ~/Applications 失败: %w", err)
+	}
+
+	// 升级时保留已经存在于目标 App 内的 V2 vault.dat。
 	var savedVault []byte
 	oldVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
 	if b, e := os.ReadFile(oldVault); e == nil && len(b) > 0 {
@@ -98,19 +106,18 @@ func ensureWritableInstall() (bool, error) {
 	}
 
 	_ = os.RemoveAll(dstApp)
-	cp := exec.Command("/bin/cp", "-R", srcApp, dstApp)
-	if out, e := cp.CombinedOutput(); e != nil {
-		return false, fmt.Errorf("自动安装到 ~/Applications 失败: %v: %s", e, strings.TrimSpace(string(out)))
+	// ditto 比 cp -R 更适合复制 macOS .app bundle/扩展属性。
+	if out, e := exec.Command("/usr/bin/ditto", srcApp, dstApp).CombinedOutput(); e != nil {
+		return false, fmt.Errorf("自动安装失败: %v: %s", e, strings.TrimSpace(string(out)))
 	}
 
 	newResources := filepath.Join(dstApp, "Contents", "Resources")
-	if e := os.MkdirAll(newResources, 0755); e != nil {
-		return false, e
+	if err := os.MkdirAll(newResources, 0755); err != nil {
+		return false, fmt.Errorf("创建 Resources 失败: %w", err)
 	}
 	if len(savedVault) > 0 {
-		newVault := filepath.Join(newResources, "vault.dat")
-		if e := os.WriteFile(newVault, savedVault, 0600); e != nil {
-			return false, fmt.Errorf("恢复 vault.dat 失败: %v", e)
+		if err := os.WriteFile(filepath.Join(newResources, "vault.dat"), savedVault, 0600); err != nil {
+			return false, fmt.Errorf("恢复 vault.dat 失败: %w", err)
 		}
 	}
 
@@ -118,11 +125,14 @@ func ensureWritableInstall() (bool, error) {
 	if out, e := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", dstApp).CombinedOutput(); e != nil {
 		return false, fmt.Errorf("安装后签名失败: %v: %s", e, strings.TrimSpace(string(out)))
 	}
-	if e := exec.Command("/usr/bin/open", dstApp).Start(); e != nil {
-		return false, fmt.Errorf("重新启动密码箱失败: %v", e)
+
+	// 直接启动目标 bundle；成功后当前临时实例立即退出。
+	if out, e := exec.Command("/usr/bin/open", "-n", dstApp).CombinedOutput(); e != nil {
+		return false, fmt.Errorf("重新启动失败: %v: %s", e, strings.TrimSpace(string(out)))
 	}
 	return true, nil
 }
+
 func appBundlePaths() (bundleRoot, resourcesDir string, ok bool) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -411,7 +421,7 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 	)
 
 	spacer := canvas.NewRectangle(color.Transparent)
-	spacer.SetMinSize(fyne.NewSize(300, 160))
+	spacer.SetMinSize(fyne.NewSize(760, 260))
 
 	popupContent := container.NewStack(bg, spacer, container.NewPadded(content))
 	popup = widget.NewModalPopUp(popupContent, win.Canvas())
@@ -420,15 +430,22 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 }
 
 func main() {
-	// 在创建 GUI 前处理 App Translocation。成功重启后立即退出当前只读实例。
-	if relaunched, err := ensureWritableInstall(); err == nil && relaunched {
+	// 在创建 GUI 前处理只读/Translocation 实例。失败时绝不继续写临时目录。
+	relaunched, installErr := ensureWritableInstall()
+	if relaunched {
 		return
 	}
 
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱 v2.9")
+	myWindow := myApp.NewWindow("密码箱 v3.0")
 	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
+
+	if installErr != nil {
+		showBeautifulError(myWindow, "启动失败", "无法把密码箱安装到可写位置：\n"+installErr.Error(), func() { myApp.Quit() })
+		myWindow.ShowAndRun()
+		return
+	}
 
 	var pathErr error
 	dataFile, pathErr = vaultDataPath()
@@ -477,7 +494,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.9", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v3.0", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -523,7 +540,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v2.9", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v3.0", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
@@ -647,7 +664,7 @@ func main() {
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		brand := canvas.NewText("MIMA   密码箱 v2.9", color.White)
+		brand := canvas.NewText("MIMA   密码箱 v3.0", color.White)
 		brand.TextStyle = fyne.TextStyle{Bold: true}
 		brand.TextSize = 22
 		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
