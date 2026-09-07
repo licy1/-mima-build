@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -45,145 +44,34 @@ var dataFile string
 //go:embed vault_bg.png
 var vaultBackground []byte
 
-// appBundlePaths 返回当前 .app 的 bundle 根目录和 Resources 目录。
-// 正式打包后可执行文件位于 PasswordBox.app/Contents/MacOS/mima。
-// ensureWritableInstall 解决 macOS App Translocation：从下载目录首次启动时，
-// 系统可能把 App 放进只读的随机路径。此时把完整 App 安装到 ~/Applications，
-// 保留已有 App 内的 vault.dat，再移除 quarantine、重新签名并从可写位置重启。
-func ensureWritableInstall() (bool, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return false, fmt.Errorf("无法取得程序路径: %w", err)
-	}
-	exe, _ = filepath.Abs(exe)
-	macosDir := filepath.Dir(exe)
-	contentsDir := filepath.Dir(macosDir)
-	if filepath.Base(contentsDir) != "Contents" {
-		return false, nil
-	}
-	srcApp := filepath.Dir(contentsDir)
-	resourcesDir := filepath.Join(contentsDir, "Resources")
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false, err
-	}
-	dstApp := filepath.Join(home, "Applications", "密码箱.app")
-
-	// 只有确认当前 Resources 真正可写，并且不在 macOS 临时/Translocation
-	// 区域时才继续原地运行。任何 /private/var/folders 下的实例都必须搬走。
-	inTemporaryArea := strings.HasPrefix(filepath.Clean(srcApp), "/private/var/folders/") ||
-		strings.Contains(srcApp, "/AppTranslocation/")
-	probeOK := false
-	if !inTemporaryArea {
-		if f, e := os.CreateTemp(resourcesDir, ".mima-write-test-*"); e == nil {
-			name := f.Name()
-			_ = f.Close()
-			_ = os.Remove(name)
-			probeOK = true
-		}
-	}
-	if probeOK {
-		return false, nil
-	}
-
-	// 如果已经位于 ~/Applications 但仍不可写，就明确报错，不再继续创建 vault。
-	cleanSrc, _ := filepath.Abs(srcApp)
-	cleanDst, _ := filepath.Abs(dstApp)
-	if cleanSrc == cleanDst {
-		return false, fmt.Errorf("~/Applications/密码箱.app/Contents/Resources 当前不可写")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(dstApp), 0755); err != nil {
-		return false, fmt.Errorf("创建 ~/Applications 失败: %w", err)
-	}
-
-	// 升级时保留已经存在于目标 App 内的 V2 vault.dat。
-	var savedVault []byte
-	oldVault := filepath.Join(dstApp, "Contents", "Resources", "vault.dat")
-	if b, e := os.ReadFile(oldVault); e == nil && len(b) > 0 {
-		savedVault = b
-	}
-
-	_ = os.RemoveAll(dstApp)
-	// ditto 比 cp -R 更适合复制 macOS .app bundle/扩展属性。
-	if out, e := exec.Command("/usr/bin/ditto", srcApp, dstApp).CombinedOutput(); e != nil {
-		return false, fmt.Errorf("自动安装失败: %v: %s", e, strings.TrimSpace(string(out)))
-	}
-
-	newResources := filepath.Join(dstApp, "Contents", "Resources")
-	if err := os.MkdirAll(newResources, 0755); err != nil {
-		return false, fmt.Errorf("创建 Resources 失败: %w", err)
-	}
-	if len(savedVault) > 0 {
-		if err := os.WriteFile(filepath.Join(newResources, "vault.dat"), savedVault, 0600); err != nil {
-			return false, fmt.Errorf("恢复 vault.dat 失败: %w", err)
-		}
-	}
-
-	_ = exec.Command("/usr/bin/xattr", "-dr", "com.apple.quarantine", dstApp).Run()
-	if out, e := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", dstApp).CombinedOutput(); e != nil {
-		return false, fmt.Errorf("安装后签名失败: %v: %s", e, strings.TrimSpace(string(out)))
-	}
-
-	// 直接启动目标 bundle；成功后当前临时实例立即退出。
-	if out, e := exec.Command("/usr/bin/open", "-n", dstApp).CombinedOutput(); e != nil {
-		return false, fmt.Errorf("重新启动失败: %v: %s", e, strings.TrimSpace(string(out)))
-	}
-	return true, nil
-}
-
-func appBundlePaths() (bundleRoot, resourcesDir string, ok bool) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", "", false
-	}
-	macosDir := filepath.Dir(exe)
-	contentsDir := filepath.Dir(macosDir)
-	if filepath.Base(contentsDir) != "Contents" {
-		return "", "", false
-	}
-	bundleRoot = filepath.Dir(contentsDir)
-	resourcesDir = filepath.Join(contentsDir, "Resources")
-	return bundleRoot, resourcesDir, true
-}
-
-// vaultDataPath 按用户要求把密码库放在 .app/Contents/Resources/vault.dat。
-// 开发环境下回退到当前目录 vault.dat。
+// vaultDataPath 使用 v2.4 已验证稳定的可写目录。
+// macOS: ~/Library/Application Support/PasswordBox/vault.dat
+// 密码库仍然只在本机，避免修改正在运行的 .app、重签名和 App Translocation 问题。
 func vaultDataPath() (string, error) {
-	if _, resourcesDir, ok := appBundlePaths(); ok {
-		if err := os.MkdirAll(resourcesDir, 0700); err != nil {
-			return "", err
-		}
-		return filepath.Join(resourcesDir, "vault.dat"), nil
-	}
-	return filepath.Abs("vault.dat")
-}
-
-// resignBundle 在 vault.dat 写入后重新做 ad-hoc 签名。
-// vault.dat 位于 app 包内部，修改它会改变签名封装，所以每次保存后都重新签名。
-func resignBundle() error {
-	bundleRoot, _, ok := appBundlePaths()
-	if !ok {
-		return nil
-	}
-	cmd := exec.Command("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", bundleRoot)
-	out, err := cmd.CombinedOutput()
+	base, err := os.UserConfigDir()
 	if err != nil {
-		return fmt.Errorf("重新签名失败: %v: %s", err, strings.TrimSpace(string(out)))
+		return "", err
 	}
-	return nil
+	dir := filepath.Join(base, "PasswordBox")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "vault.dat"), nil
 }
 
-// migrateLegacyVault 如果 .app 内还没有 vault.dat，优先迁移旧位置的 V2 金库。
-// 这样升级后不需要把用户的加密密码文件上传到公开 GitHub 仓库。
+// migrateLegacyVault 只在稳定数据目录没有 vault.dat 时迁移旧数据。
+// 兼容此前曾经放进 .app/Contents/Resources 的 V2 vault.dat。
 func migrateLegacyVault(dst string) {
 	if _, err := os.Stat(dst); err == nil {
 		return
 	}
 	var candidates []string
-	if base, err := os.UserConfigDir(); err == nil {
-		candidates = append(candidates, filepath.Join(base, "PasswordBox", "vault.dat"))
+	if exe, err := os.Executable(); err == nil {
+		macosDir := filepath.Dir(exe)
+		contentsDir := filepath.Dir(macosDir)
+		if filepath.Base(contentsDir) == "Contents" {
+			candidates = append(candidates, filepath.Join(contentsDir, "Resources", "vault.dat"))
+		}
 	}
 	candidates = append(candidates, "vault.dat")
 	for _, src := range candidates {
@@ -194,9 +82,7 @@ func migrateLegacyVault(dst string) {
 		}
 		b, err := os.ReadFile(src)
 		if err == nil && len(b) > 0 {
-			if err := os.WriteFile(dst, b, 0600); err == nil {
-				_ = resignBundle()
-			}
+			_ = os.WriteFile(dst, b, 0600)
 			return
 		}
 	}
@@ -382,7 +268,7 @@ func encryptAndSave(password string) error {
 	if err := os.WriteFile(dataFile, raw, 0600); err != nil {
 		return err
 	}
-	return resignBundle()
+	return nil
 }
 
 // ==================== 国风武将专属配色 ====================
@@ -415,13 +301,13 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 	content := container.NewVBox(
 		container.NewCenter(titleText),
 		widget.NewLabel(""),
-		container.NewCenter(msgText),
+		container.NewGridWrap(fyne.NewSize(680, 120), msgText),
 		widget.NewLabel(""),
 		container.NewCenter(btn),
 	)
 
 	spacer := canvas.NewRectangle(color.Transparent)
-	spacer.SetMinSize(fyne.NewSize(760, 260))
+	spacer.SetMinSize(fyne.NewSize(760, 300))
 
 	popupContent := container.NewStack(bg, spacer, container.NewPadded(content))
 	popup = widget.NewModalPopUp(popupContent, win.Canvas())
@@ -430,22 +316,10 @@ func showBeautifulError(win fyne.Window, title, msg string, onClose func()) {
 }
 
 func main() {
-	// 在创建 GUI 前处理只读/Translocation 实例。失败时绝不继续写临时目录。
-	relaunched, installErr := ensureWritableInstall()
-	if relaunched {
-		return
-	}
-
 	myApp := app.New()
-	myWindow := myApp.NewWindow("密码箱 v3.0")
+	myWindow := myApp.NewWindow("密码箱 v3.1")
 	myWindow.Resize(fyne.NewSize(1280, 760))
 	myApp.Settings().SetTheme(&customTheme{Base: myApp.Settings().Theme()})
-
-	if installErr != nil {
-		showBeautifulError(myWindow, "启动失败", "无法把密码箱安装到可写位置：\n"+installErr.Error(), func() { myApp.Quit() })
-		myWindow.ShowAndRun()
-		return
-	}
 
 	var pathErr error
 	dataFile, pathErr = vaultDataPath()
@@ -494,7 +368,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(350, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v3.0", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v3.1", color.White)
 		title.TextSize = 22
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		subtitle := canvas.NewText("AES-256-GCM 本地加密 · 主密码不会离开本机", color.NRGBA{R: 207, G: 174, B: 255, A: 255})
@@ -540,7 +414,7 @@ func main() {
 		widthSpacer := canvas.NewRectangle(color.Transparent)
 		widthSpacer.SetMinSize(fyne.NewSize(300, 0))
 
-		title := canvas.NewText("MIMA · PASSWORD BOX · v3.0", color.White)
+		title := canvas.NewText("MIMA · PASSWORD BOX · v3.1", color.White)
 		title.TextSize = 23
 		title.TextStyle = fyne.TextStyle{Bold: true}
 		title.Alignment = fyne.TextAlignCenter
@@ -664,7 +538,7 @@ func main() {
 		addBtn := widget.NewButtonWithIcon("添加记录", theme.ContentAddIcon(), func() { showEditDialog(0, true) })
 		addBtn.Importance = widget.HighImportance
 
-		brand := canvas.NewText("MIMA   密码箱 v3.0", color.White)
+		brand := canvas.NewText("MIMA   密码箱 v3.1", color.White)
 		brand.TextStyle = fyne.TextStyle{Bold: true}
 		brand.TextSize = 22
 		brandSub := canvas.NewText("PRIVATE  ·  SECURE  ·  LOCAL", color.NRGBA{R: 170, G: 185, B: 255, A: 255})
